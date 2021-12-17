@@ -2,7 +2,7 @@
 ## Simple brute force login protection for RDP/RDS and MS SQL Server using PowerShell and Windows task scheduler.
 
 # Foreword
-First off, opening either RDP or MSSQL to the internet is inherently insecure and should not be done unless absolutely necessary. However, if it must here is a simple solution for protecting these services from brute force login attempts.
+Obviously opening either RDP or MSSQL to the internet is a bad idea. But sometimes it's unavoidable, particularly with RDP when a remote worker needs quick access to their office machine and setting up a VPN or standing up a proper RDS server isn't possible. Here is a simple and effective Powershell script for tracking and quickly blocking malicious IPs attempting to brute force your RDP or MSSQL server.
 
 # Introduction
 If for one reason or another you need a remotely accessible MSSQL database (lab environment, legacy software, etc.) or RDP/RDS server, it will inevitably become the target of brute force login attempts. Fortunately, Windows provides auditing mechanisms for these services that capture the source IP along with other information in the event log, and task scheduler provides a means for triggering a program to run when an event is captured, and even allows you to pass the event data to the program.
@@ -24,9 +24,13 @@ For each service a Windows Task Scheduler task is created which is triggered off
 An additional scheduled task is run every minute and scans existing firewall rules and cleans up duplicates. For each rule the unblock time and counter reset time are extracted from the XML saved in the description field. Any enabled rules with expired unblock times are removed as well as disabled rules with expired counter reset times. In some cases multiple login attempts that don't exceed the block threshold will lead to the creation of more than one disabled firewall rule. This task will iterate through these, tally up the login attempts then create a single enabled rule and delete the duplicates.
 
 # Installing
-From an elevated PowerShell console run the `Installer.ps1` script. By default a folder is created at `%ProgramFiles%\WindowsPowerShell\Modules\PS Login Monitor\` and the script placed there with the options to track RDP/RDS and MSSQL logins. All tasks are run under the `SYSTEM` account. For RDP/RDS the script will attempt to enable the login auditing automatically. All parameters are at the top of the `PSLoginMonitor.ps1` file. A whitelist of private IPv4 addresses is contained in the `$WhiteList` array object; modify as needed but make sure at the bare minimum the subnet of your server is whitelisted or you can lock yourself out! By default blocked IPs are unblocked after 24 hours, login counters are reset after 15 minutes and IPs blocked after 3 failed logins.
+From an elevated PowerShell console run the [installer.ps1](https://github.com/rgconrad514/PS-Login-Monitor/blob/main/Installer.ps1) script (`.\Installer.ps1`). By default a folder is created at `%ProgramFiles%\WindowsPowerShell\Modules\PS Login Monitor\` and the script placed there with the options to track RDP/RDS and MSSQL logins. All tasks are run under the `SYSTEM` account. For RDP/RDS the script will attempt to enable the login auditing automatically. All parameters are at the top of the [PSLoginMonitor.ps1](https://github.com/rgconrad514/PS-Login-Monitor/blob/main/PSLoginMonitor.ps1) file. A whitelist of private IPv4 address ranges is contained in the `$WhiteList` array object; modify as needed but make sure at the bare minimum the subnet of your server is whitelisted or you can lock yourself out! By default blocked IPs are unblocked after 24 hours, login counters are reset after 15 minutes and IPs blocked after 3 failed logins.
 
 ![Firewall](https://user-images.githubusercontent.com/24600116/146605235-084fc26a-3ae8-4da8-8251-8362f96c285f.PNG)
+
+# Tested On
+* Windows Server 2016
+* Windows 10
 
 # Acknowledgements
 Thanks to the author of [this bit of IP address code](http://www.gi-architects.co.uk/2016/02/powershell-check-if-ip-or-subnet-matchesfits/) that I used for checking IPs in the whitelist.
