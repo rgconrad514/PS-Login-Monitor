@@ -28,6 +28,9 @@ From an elevated PowerShell console run the [installer.ps1](https://github.com/r
 
 ![Firewall](https://user-images.githubusercontent.com/24600116/146605235-084fc26a-3ae8-4da8-8251-8362f96c285f.PNG)
 
+# Performance/limitations
+The intent of this code is primarly to allow an IT admin to quickly set up brute force login protection without requiring the installation of other software as a temporary stop-gap. The only requirements are local admin access to the server, PowerShell enabled, Windows Defender Firewall enabled (usually only disabled when using 3rd-party AV firewall) and Windows Task Scheduler. Usually the only configuration needed is enabling PowerShell script execution. Performance will begin to slow down as the number of firewall rules grows since the script reguarly scans the entire list of firewall rules. Most testing is performed on Windows Server 2016 w/ 16GB RAM and 12 vCPUs at 2.93GHz. I artificially added ~5000 block rules to the windows firewall after which about half of the failed login attempts appeared to be missed by the event tasks and scripts, meaning an IP address was able to attempt around 6-8 login attempts before being blocked with the block threshold set at 3. Although not too bad overall, the windows firewall was clearly being pushed to its limits and viewing existing rules in the MMC console was also very slow. Keeping the block time around 24-72 hours will help prevent the firewall from filling up while still effectively stopping brute force attempts. If your server is regularly under attack from thousands of unique IP addresses then you need to consider a commercial IDS solution or properly secure remote access for these services.
+
 # Tested On
 * Windows Server 2016
 * Windows 10
