@@ -19,10 +19,10 @@ $BlockTimeHours = 24
 
  <# 
     After a failed login, how long before the failed login counter is "reset". Intended to
-    prevent one-off login failures from blocking an IP over a long period of time. 10-15 minutes
-    is a good setting.
+    prevent one-off login failures from blocking an IP over a long period of time. From testing
+    1 - 3 hours appears to work best.
  #>
-$ResetCounterTimeMinutes = 15
+$ResetCounterTimeHours = 3
 
 <#
    List of IPs to ignore login failures. Ranges must be in CIDR notation. Default list is all
@@ -360,7 +360,16 @@ function On-FailedRdpLogin
         [int]
         $IpPort
     )
-    ProcessFailedLogin $EventId $IpAddress
+    # Only capture these login types (from https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/basic-audit-logon-events):
+    #  3 - Network - A user or computer logged on to this computer from the network.
+    # 10 - RemoteInteractive - A user logged on to this computer remotely using Terminal Services or Remote Desktop.
+
+    $loginTypesToProcess = @(3, 10);
+    
+    if($loginTypesToProcess.Contains($LogonType))
+    {
+        ProcessFailedLogin $EventId $IpAddress
+    }
 }
 
 function On-FailedMssqlLogin
@@ -436,7 +445,7 @@ function ProcessFailedLogin
 
     $FWRule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue | Select-Object -First 1
 
-    $counterResetTime = (Get-Date).AddMinutes([System.Math]::Max($ResetCounterTimeMinutes, 1)).ToString($dtFormat)
+    $counterResetTime = (Get-Date).AddHours([System.Math]::Max($ResetCounterTimeHours, 1)).ToString($dtFormat)
 
     if($FWRule -eq $null) #First failed login
     {
