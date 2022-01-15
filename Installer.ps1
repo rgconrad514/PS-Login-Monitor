@@ -26,5 +26,5 @@ if($installMssqlMonitor -eq "Yes")
 if($installRdpMonitor -eq "Yes" -or $installMssqlMonitor -eq "Yes")
 {
     Register-ScheduledTask -Xml (get-content "$PSScriptRoot\PS Login Monitor - Update Firewall Rules.xml" | out-string) -TaskName "PS Login Monitor - Update Firewall Rules" -Force
-    [System.Windows.MessageBox]::Show("Task registered", "Title", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+    [System.Windows.MessageBox]::Show("Tasks registered", "Title", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
 }
