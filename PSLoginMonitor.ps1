@@ -495,3 +495,20 @@ function ProcessFailedLogin
         Set-NetFirewallRule -Name $FWRule.Name -Description $description.OuterXml #Update XML in description field
     }
 }
+<#
+    Displays data stored in firewall rules for recent failed login attempts by client IP address
+#>
+function Show-FirewallRuleStats
+{
+    Get-NetFirewallRule -Group $FirewallGroup | ForEach-Object {
+        New-Object -Type PSObject -Property @{
+            'IPAddress' =  ([xml]$_.Description).LoginData.IpAddress
+            'Failed Login Count'  =  [int]([xml]$_.Description).LoginData.FailedLoginCount
+            'Last Login Attempt' = [DateTime]([xml]$_.Description).LoginData.LastLoginTime
+            'Unblock Time' = [DateTime]([xml]$_.Description).LoginData.UnblockTime
+            'Counter Reset Time' = [DateTime]([xml]$_.Description).LoginData.CounterResetTime
+            'Blocked' = (&{If($_.Enabled -eq "True") {"Yes"} Else {"No"}})
+        } 
+    } | Sort-Object -Descending {$_."Last Login Attempt"
+    } | Format-Table -AutoSize -Property 'IPAddress', 'Failed Login Count', 'Last Login Attempt', 'Unblock Time', 'Counter Reset Time', 'Blocked'
+}
