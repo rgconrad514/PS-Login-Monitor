@@ -44,7 +44,7 @@
     <Exec>
       <Command>powershell.exe</Command>
       <Arguments>-command "&amp; {. .\PSLoginMonitor.ps1; On-FailedMSSQLLogin '$(EventID)' '$(EventData)'}"</Arguments>
-      <WorkingDirectory>%ProgramFiles%\WindowsPowerShell\Modules\PS Login Monitor</WorkingDirectory>
+	  <WorkingDirectory></WorkingDirectory>
     </Exec>
   </Actions>
 </Task>

@@ -64,7 +64,7 @@
     <Exec>
       <Command>powershell.exe</Command>
       <Arguments>-command "&amp; {. .\PSLoginMonitor.ps1; On-FailedRdpLogin '$(EventID)' '$(SubjectUserSid)' '$(SubjectUserName)' '$(SubjectDomainName)' '$(SubjectLogonId)' '$(TargetUserSid)' '$(TargetUserName)' '$(TargetDomainName)' '$(Status)' '$(FailureReason)' '$(SubStatus)' '$(LogonType)' '$(LogonProcessName)' '$(AuthenticationPackageName)' '$(WorkstationName)' '$(TransmittedServices)' '$(LmPackageName)' '$(KeyLength)' '$(ProcessId)' '$(ProcessName)' '$(IpAddress)' '$(IpPort)'}"</Arguments>
-      <WorkingDirectory>%ProgramFiles%\WindowsPowerShell\Modules\PS Login Monitor\</WorkingDirectory>
+	  <WorkingDirectory></WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
