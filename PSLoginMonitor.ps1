@@ -598,4 +598,3 @@ function Uninstall-PSLoginMonitor
 
     $rootFolder.DeleteFolder($FirewallGroup, 0)
 }
-Install-PSLoginMonitor
