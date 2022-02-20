@@ -438,31 +438,7 @@ function ProcessFailedLogin
             $executionTime = $unblockTime
         }
 
-        # Create task assigned to firewall rule to eventually delete
-        # when either the unblock time or counter reset time expires
-        $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
-        $trigger.StartBoundary = $executionTime.ToString('s')
-        $trigger.EndBoundary = $executionTime.AddMinutes(1).ToString('s')
-
-        # Command to remove firewall rule by unique instance ID
-        $cmd = '-command "Remove-NetFirewallRule -Name ''' + $instanceId + '''"'
-
-        # Set task to delete after running
-        $settings = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter 00:00:05 `
-                    -DisallowDemandStart `
-                    -AllowStartIfOnBatteries `
-                    -DontStopIfGoingOnBatteries
-
-        $settings.Priority = 0
-        
-        # Run under SYSTEM account
-        $principal = New-ScheduledTaskPrincipal -RunLevel Highest -UserId "S-1-5-18"
-
-        $action = New-ScheduledTaskAction -Execute powershell.exe -Argument $cmd
-
-        $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $RuleName
-
-        Register-ScheduledTask -TaskName $InstanceId -InputObject $task -TaskPath $FirewallGroup
+        CreateUnblockTask $instanceId $RuleName $executionTime
     }
     else #Subsequent login failures
     {
@@ -478,13 +454,32 @@ function ProcessFailedLogin
         $description.LoginData.FailedLoginCount = $loginCount.ToString()
         $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
 
+        if($loginCount -ge ($BlockCount + 10))
+        {
+        <#
+        From testing it appears that a large volume of failed logins causes firewall rules
+        that are edited by multiple processes to occassionally become corrupted and fail to block
+        the offending IP address. If an IP continues to connect despite the existence of an enabled
+        firewall, just create a new one.
+        #>
+            $FWRule = New-NetFirewallRule -DisplayName $RuleName `
+                        -Direction Inbound `
+                        -Description $description.OuterXml `
+                        -InterfaceType Any `
+                        -Group $FirewallGroup `
+                        -Action Block `
+                        -RemoteAddress $IpAddress `
+                        -Enable True
+
+            CreateUnblockTask $FWRule.InstanceId $RuleName $unblockTime
+        }
         if($loginCount -ge $BlockCount)
         {
-            Enable-NetFirewallRule -Name $FWRule.Name
+            Enable-NetFirewallRule -Name $instanceId
             $executionTime = $unblockTime
         }
 
-        Set-NetFirewallRule -Name $FWRule.Name -Description $description.OuterXml #Update XML in description field
+        Set-NetFirewallRule -Name $instanceId -Description $description.OuterXml #Update XML in description field
         
         #Update the execution time of the delete task assigned to the firewall rule
         $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
@@ -494,7 +489,51 @@ function ProcessFailedLogin
         Set-ScheduledTask -TaskName $instanceId -TaskPath $FirewallGroup -Trigger $trigger
     }
 }
+<#
+    Creates a task assigned to a firewall rule to eventually delete
+    when either the unblock time or counter reset time expires
+#>
+function CreateUnblockTask
+{
+    [cmdletbinding()]
+    Param
+    (
+        [parameter(position = 0, Mandatory=$true)]
+        [string]
+        $InstanceId,
+        [parameter(position = 1, Mandatory=$true)]
+        [string]
+        $RuleName,
+        [parameter(position = 2, Mandatory=$true)]
+        [DateTime]
+        $ExecutionTime
+    )
+    # Create task assigned to firewall rule to eventually delete
+    # when either the unblock time or counter reset time expires
+    $trigger =  New-ScheduledTaskTrigger -At $ExecutionTime -Once
+    $trigger.StartBoundary = $ExecutionTime.ToString('s')
+    $trigger.EndBoundary = $ExecutionTime.AddMinutes(1).ToString('s')
 
+    # Command to remove firewall rule by unique instance ID
+    $cmd = '-command "Remove-NetFirewallRule -Name ''' + $InstanceId + '''"'
+
+    # Set task to delete after running
+    $settings = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter 00:00:05 `
+                -DisallowDemandStart `
+                -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries
+
+    $settings.Priority = 0
+        
+    # Run under SYSTEM account
+    $principal = New-ScheduledTaskPrincipal -RunLevel Highest -UserId "S-1-5-18"
+
+    $action = New-ScheduledTaskAction -Execute powershell.exe -Argument $cmd
+
+    $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $RuleName
+
+    Register-ScheduledTask -TaskName $InstanceId -InputObject $task -TaskPath $FirewallGroup
+}
 <#
     Displays data stored in firewall rules for recent failed login attempts by client IP address
 #>
