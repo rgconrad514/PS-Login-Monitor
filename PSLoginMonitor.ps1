@@ -25,6 +25,13 @@ $BlockTimeHours = 24
 $ResetCounterTimeHours = 3
 
 <#
+    Use netsh command to manage firewall rules. Generally has better performance and less memory/CPU
+    overhead and will allow script to handle higher volumes of login attempts. May break if MS
+    changes output of netsh command since the script parses the command line output.
+#>
+[bool]$UseNetsh = 1
+
+<#
    List of IPs to ignore login failures. Ranges must be in CIDR notation. Default list is all
    private IPv4 ranges.
 #>
@@ -320,7 +327,14 @@ function On-FailedRdpLogin
     
     if($loginTypesToProcess.Contains($LogonType))
     {
-        ProcessFailedLogin $EventId $IpAddress
+        if($UseNetsh)
+        {
+            ProcessFailedLoginNetsh $EventId $IpAddress
+        }
+        else
+        {
+            ProcessFailedlogin $EventId $IpAddress
+        }
     }
 }
 
@@ -357,7 +371,14 @@ function On-FailedMssqlLogin
             break
         }
     }
-    ProcessFailedLogin $EventId $IpAddress
+    if($UseNetsh)
+    {
+        ProcessFailedLoginNetsh $EventId $IpAddress
+    }
+    else
+    {
+        ProcessFailedlogin $EventId $IpAddress
+    }
 }
 
 function ProcessFailedLogin
@@ -402,7 +423,7 @@ function ProcessFailedLogin
     $unblockTime = Get-UnblockTime
 
     $executionTime = $counterResetTime
-
+    
     if($FWRule -eq $null) #First failed login
     {
         #Login data saved to rule description field
@@ -454,6 +475,14 @@ function ProcessFailedLogin
         $description.LoginData.FailedLoginCount = $loginCount.ToString()
         $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
 
+        if($loginCount -ge $BlockCount)
+        {
+            Enable-NetFirewallRule -Name $instanceId
+            $executionTime = $unblockTime
+        }
+
+        Set-NetFirewallRule -Name $instanceId -Description $description.OuterXml #Update XML in description field
+
         if($loginCount -ge ($BlockCount + 10))
         {
         <#
@@ -462,7 +491,7 @@ function ProcessFailedLogin
         the offending IP address. If an IP continues to connect despite the existence of an enabled
         firewall, just create a new one.
         #>
-            $FWRule = New-NetFirewallRule -DisplayName $RuleName `
+            $NewFWRule = New-NetFirewallRule -DisplayName $RuleName `
                         -Direction Inbound `
                         -Description $description.OuterXml `
                         -InterfaceType Any `
@@ -471,24 +500,130 @@ function ProcessFailedLogin
                         -RemoteAddress $IpAddress `
                         -Enable True
 
-            CreateUnblockTask $FWRule.InstanceId $RuleName $unblockTime
-        }
-        if($loginCount -ge $BlockCount)
-        {
-            Enable-NetFirewallRule -Name $instanceId
-            $executionTime = $unblockTime
+            CreateUnblockTask $NewFWRule.InstanceId $RuleName $unblockTime
         }
 
-        Set-NetFirewallRule -Name $instanceId -Description $description.OuterXml #Update XML in description field
-        
         #Update the execution time of the delete task assigned to the firewall rule
         $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
-        $trigger.StartBoundary = $executionTime.ToString('s')
-        $trigger.EndBoundary = $executionTime.AddMinutes(1).ToString('s')
 
         Set-ScheduledTask -TaskName $instanceId -TaskPath $FirewallGroup -Trigger $trigger
     }
 }
+
+function ProcessFailedLoginNetsh
+{
+    [cmdletbinding()]
+    Param
+    (
+        [parameter(position = 0, Mandatory=$true)]
+        [int]
+        $EventID,
+
+        [parameter(position = 1, Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]
+        $IpAddress
+    )
+
+    if($EventIdsToProcess.Contains($EventId) -eq $false)
+    {
+        return
+    }
+
+    if($IpAddress -eq '' -or $IpAddress.Contains("localhost") -eq $true)
+    {
+        return
+    }
+
+    foreach($ip in $WhiteList)
+    {
+        if((Check-Subnet $IpAddress $ip).Condition -eq $true)
+        {
+            return
+        }   
+    }
+
+    $ruleName = [string]::Format($ruleNameTemplate, $IpAddress)
+
+    $FWRule = netsh advfirewall firewall show rule name="$ruleName" verbose
+
+    $counterResetTime = (Get-Date).AddHours([System.Math]::Max($ResetCounterTimeHours, 1))
+
+    $unblockTime = Get-UnblockTime
+
+    $executionTime = $counterResetTime
+    
+    if($FWRule -eq 'No rules match the specified criteria.') #First failed login
+    {
+        #Login data saved to rule description field
+        [xml]$description = $LoginData
+
+        $description.LoginData.FailedLoginCount = "1"
+        $description.LoginData.IpAddress = $IpAddress
+        $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
+        $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
+        $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+
+        #Set placeholder rule that will be enabled when failed login threshold met
+        $enabled = "no"
+
+        if($BlockCount -le 1) #Block on first failed attempt
+        {
+            $enabled = "yes"
+        }
+
+        $descriptionXml = $description.OuterXml;
+        netsh advfirewall firewall add rule name=$ruleName dir=in interface=any action=block remoteip=$IPAddress enable=$enabled description="$descriptionXml"
+        Get-NetFirewallRule -DisplayName $ruleName | ForEach { $_.Group = $FirewallGroup; Set-NetFirewallRule -InputObject $_ }
+
+        if($enabled -eq 'yes')
+        {
+            $executionTime = $unblockTime
+        }
+
+        CreateUnblockTask $RuleName $RuleName $executionTime
+    }
+    else #Subsequent login failures
+    {
+        $description = [xml](($FWRule | Where-Object {$_.StartsWith('Description:') } | select -First 1).Replace('Description:', '').Trim()) #Pull XML from rule description field
+        $description.PreserveWhitespace = $true
+        $loginCount = [int]$description.LoginData.FailedLoginCount
+        $loginCount = $loginCount + 1 #increment failed login count
+
+        $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
+        $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
+        $description.LoginData.FailedLoginCount = $loginCount.ToString()
+        $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+
+        if($loginCount -ge $BlockCount)
+        {
+            netsh advfirewall firewall set rule name=$RuleName new enable=yes
+            $executionTime = $unblockTime
+        }
+
+        $xmlText = $description.OuterXml
+        netsh advfirewall firewall set rule name=$ruleName new description="$xmlText" #Update XML in description field
+
+        if($loginCount -ge ($BlockCount + 10))
+        {
+        <#
+        From testing it appears that a large volume of failed logins causes firewall rules
+        that are edited by multiple processes to occassionally become corrupted and fail to block
+        the offending IP address. If an IP continues to connect despite the existence of an enabled
+        firewall, just create a new one.
+        #>
+            netsh advfirewall firewall add rule name=$RuleName dir=in interface=any action=block remoteip=$IPAddress enable=yes description="$description"
+
+            CreateUnblockTask $RuleName $RuleName $unblockTime
+        }
+
+        #Update the execution time of the delete task assigned to the firewall rule
+        $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
+
+        Set-ScheduledTask -TaskName $ruleName -TaskPath $FirewallGroup -Trigger $trigger
+    }
+}
+
 <#
     Creates a task assigned to a firewall rule to eventually delete
     when either the unblock time or counter reset time expires
@@ -511,29 +646,36 @@ function CreateUnblockTask
     # Create task assigned to firewall rule to eventually delete
     # when either the unblock time or counter reset time expires
     $trigger =  New-ScheduledTaskTrigger -At $ExecutionTime -Once
-    $trigger.StartBoundary = $ExecutionTime.ToString('s')
-    $trigger.EndBoundary = $ExecutionTime.AddMinutes(1).ToString('s')
 
     # Command to remove firewall rule by unique instance ID
-    $cmd = '-command "Remove-NetFirewallRule -Name ''' + $InstanceId + '''"'
+    $firewallRuleDeleteCommand = '-command "Remove-NetFirewallRule -Name ''' + $InstanceId + '''"'
 
-    # Set task to delete after running
-    $settings = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter 00:00:05 `
-                -DisallowDemandStart `
-                -AllowStartIfOnBatteries `
-                -DontStopIfGoingOnBatteries
+    if($InstanceId -eq $RuleName)
+    {
+        $firewallRuleDeleteCommand = '-command "Remove-NetFirewallRule -DisplayName ''' + $InstanceId + '''"'
+    }
+    
+    # Command to remove task after running
+    $taskDeleteCommand = '-command "Unregister-ScheduledTask -TaskName ''' + $InstanceId + ''' -TaskPath ''\' + $FirewallGroup + '\'' -Confirm:$false"'
 
-    $settings.Priority = 0
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit ([System.TimeSpan]::FromHours(1)) `
+                -Hidden `
+                -Priority 0
         
     # Run under SYSTEM account
-    $principal = New-ScheduledTaskPrincipal -RunLevel Highest -UserId "S-1-5-18"
+    $principal = New-ScheduledTaskPrincipal -RunLevel Highest -UserId "SYSTEM"
 
-    $action = New-ScheduledTaskAction -Execute powershell.exe -Argument $cmd
+    $firewallRuleDeleteAction = New-ScheduledTaskAction -Execute powershell.exe -Argument $firewallRuleDeleteCommand
+    $taskDeleteAction = New-ScheduledTaskAction -Execute powershell.exe -Argument $taskDeleteCommand
 
-    $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $RuleName
+    $actions = @($firewallRuleDeleteAction, $taskDeleteAction)
+    $task = New-ScheduledTask -Action $actions -Trigger $trigger -Principal $principal -Settings $settings -Description $RuleName
 
     Register-ScheduledTask -TaskName $InstanceId -InputObject $task -TaskPath $FirewallGroup
 }
+
 <#
     Displays data stored in firewall rules for recent failed login attempts by client IP address
 #>
@@ -542,10 +684,10 @@ function Show-FirewallRuleStats
     Get-NetFirewallRule -Group $FirewallGroup | ForEach-Object {
         New-Object -Type PSObject -Property @{
             'IPAddress' =  ([xml]$_.Description).LoginData.IpAddress
-            'Failed Login Count'  =  [int]([xml]$_.Description).LoginData.FailedLoginCount
-            'Last Login Attempt' = [DateTime]([xml]$_.Description).LoginData.LastLoginTime
-            'Unblock Time' = [DateTime]([xml]$_.Description).LoginData.UnblockTime
-            'Counter Reset Time' = [DateTime]([xml]$_.Description).LoginData.CounterResetTime
+            'Failed Login Count'  = ([xml]$_.Description).LoginData.FailedLoginCount -as [int]
+            'Last Login Attempt' = ([xml]$_.Description).LoginData.LastLoginTime -as [DateTime]
+            'Unblock Time' = ([xml]$_.Description).LoginData.UnblockTime -as [DateTime]
+            'Counter Reset Time' = ([xml]$_.Description).LoginData.CounterResetTime -as [DateTime]
             'Blocked' = (&{If($_.Enabled -eq "True") {"Yes"} Else {"No"}})
         } 
     } | Sort-Object -Descending {$_."Last Login Attempt"
@@ -564,44 +706,44 @@ function Install-PSLoginMonitor
         [string]
         $ScriptPath = "$env:ProgramFiles\WindowsPowerShell\Modules\PS Login Monitor"
     )
-    Add-Type -AssemblyName PresentationFramework
-
     Uninstall-PSLoginMonitor $ScriptPath
 
     $scheduleObject = New-Object -ComObject schedule.service
     $scheduleObject.connect()
     $rootFolder = $scheduleObject.GetFolder("\")
     $rootFolder.CreateFolder($FirewallGroup)
-
-    $msgBoxTitle = "PS Login Monitor"
     
     New-Item -ItemType directory -Path $ScriptPath -Force
     Copy-Item -Path $PSScriptRoot\PSLoginMonitor.ps1 -Destination $ScriptPath -Force
+
+    Unblock-File -Path $ScriptPath\PSLoginMonitor.ps1 -Confirm:$false
     
-    $messageBoxMsg = "Do you want to set up RDP/RDS login monitoring?"
-    $installRdpMonitor = [System.Windows.MessageBox]::Show($messageBoxMsg, $msgBoxTitle, [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
-    
-    if($installRdpMonitor -eq "Yes")
+    do
     {
-        #Enable logon auditing in local policy (note: does not override domain-level GPO)
-        auditpol /set /subcategory:Logon /success:enable /failure:enable
+        $response = Read-Host -Prompt "Do you want to set up RDP/RDS login monitoring? [Y/N]"
+        if ($response -eq 'y')
+        {
+            #Enable logon auditing in local policy (note: does not override domain-level GPO)
+            auditpol /set /subcategory:Logon /success:enable /failure:enable
 
-        #Get task XML and edit working directory for task action
-        $taskXml = [xml](get-content "$PSScriptRoot\PS Login Monitor - RDP.xml" | out-string)
-        $taskXml.Task.Actions.Exec.WorkingDirectory = $ScriptPath
-        $task = Register-ScheduledTask -Xml $taskXml.OuterXml -TaskName "PS Login Monitor - RDP" -TaskPath $FirewallGroup
-    }
+            #Get task XML and edit working directory for task action
+            $taskXml = [xml](get-content "$PSScriptRoot\PS Login Monitor - RDP.xml" | out-string)
+            $taskXml.Task.Actions.Exec.WorkingDirectory = $ScriptPath
+            $task = Register-ScheduledTask -Xml $taskXml.OuterXml -TaskName "PS Login Monitor - RDP" -TaskPath $FirewallGroup
+        }
+    } until ($response -eq 'n' -or $response -eq 'y')
 
-    $messageBoxMsg = "Do you want to set up MSSQL login monitoring?"
-    $installMssqlMonitor = [System.Windows.MessageBox]::Show($messageBoxMsg, $msgBoxTitle, [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
-
-    if($installMssqlMonitor -eq "Yes")
+    do
     {
-        #Get task XML and edit working directory for task action
-        $taskXml = [xml](get-content "$PSScriptRoot\PS Login Monitor - MSSQL.xml" | out-string)
-        $taskXml.Task.Actions.Exec.WorkingDirectory = $ScriptPath
-        $task = Register-ScheduledTask -Xml $taskXml.OuterXml -TaskName "PS Login Monitor - MSSQL" -TaskPath $FirewallGroup
-    }
+        $response = Read-Host -Prompt "Do you want to set up MSSQL login monitoring? [Y/N]"
+        if ($response -eq 'y')
+        {
+            #Get task XML and edit working directory for task action
+            $taskXml = [xml](get-content "$PSScriptRoot\PS Login Monitor - MSSQL.xml" | out-string)
+            $taskXml.Task.Actions.Exec.WorkingDirectory = $ScriptPath
+            $task = Register-ScheduledTask -Xml $taskXml.OuterXml -TaskName "PS Login Monitor - MSSQL" -TaskPath $FirewallGroup
+        }
+    } until ($response -eq 'n' -or $response -eq 'y')
 }
 
 <#
@@ -617,7 +759,7 @@ function Uninstall-PSLoginMonitor
     [cmdletbinding()]
     Param
     (
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory=$true)]
         [string]
         $ScriptPath
     )
