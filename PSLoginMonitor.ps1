@@ -416,97 +416,118 @@ function ProcessFailedLogin
 
     $RuleName = [string]::Format($ruleNameTemplate, $IpAddress)
 
-    $FWRule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue | Select-Object -First 1
-
-    $counterResetTime = (Get-Date).AddHours([System.Math]::Max($ResetCounterTimeHours, 1))
-
-    $unblockTime = Get-UnblockTime
-
-    $executionTime = $counterResetTime
-    
-    if($FWRule -eq $null) #First failed login
+    #Synchronize access by IP address
+    [System.Threading.Mutex]$mutex = $null
+    if(-not [System.Threading.Mutex]::TryOpenExisting($ruleName, [ref] $mutex))
     {
-        #Login data saved to rule description field
-        [xml]$description = $LoginData
-
-        $description.LoginData.FailedLoginCount = "1"
-        $description.LoginData.IpAddress = $IpAddress
-        $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
-        $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
-        $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
-
-        #Set placeholder rule that will be enabled when failed login threshold met
-        $enabled = [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::False
-
-        if($BlockCount -le 1) #Block on first failed attempt
-        {
-            $enabled = [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True
-        }
-
-        $FWRule = New-NetFirewallRule -DisplayName $RuleName `
-                    -Direction Inbound `
-                    -Description $description.OuterXml `
-                    -InterfaceType Any `
-                    -Group $FirewallGroup `
-                    -Action Block `
-                    -RemoteAddress $IpAddress `
-                    -Enable $enabled
-
-        $instanceId = $FWRule.InstanceId
-
-        if($enabled -eq [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True)
-        {
-            $executionTime = $unblockTime
-        }
-
-        CreateUnblockTask $instanceId $RuleName $executionTime
+        $mutex = [System.Threading.Mutex]::new($true, $ipAddress)
     }
-    else #Subsequent login failures
+
+    try
     {
-        $instanceId = $FWRule.InstanceId
-
-        $description = [xml]($FWRule.Description) #Pull XML from rule description field
-        $description.PreserveWhitespace = $true
-        $loginCount = [int]$description.LoginData.FailedLoginCount
-        $loginCount = $loginCount + 1 #increment failed login count
-
-        $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
-        $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
-        $description.LoginData.FailedLoginCount = $loginCount.ToString()
-        $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
-
-        if($loginCount -ge $BlockCount)
+        if($mutex.WaitOne(30000))
         {
-            Enable-NetFirewallRule -Name $instanceId
-            $executionTime = $unblockTime
+            $FWRule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue | Select-Object -First 1
+
+            $counterResetTime = (Get-Date).AddHours([System.Math]::Max($ResetCounterTimeHours, 1))
+
+            $unblockTime = Get-UnblockTime
+
+            $executionTime = $counterResetTime
+    
+            if($FWRule -eq $null) #First failed login
+            {
+                #Login data saved to rule description field
+                [xml]$description = $LoginData
+
+                $description.LoginData.FailedLoginCount = "1"
+                $description.LoginData.IpAddress = $IpAddress
+                $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
+                $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
+                $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+
+                #Set placeholder rule that will be enabled when failed login threshold met
+                $enabled = [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::False
+
+                if($BlockCount -le 1) #Block on first failed attempt
+                {
+                    $enabled = [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True
+                }
+
+                $FWRule = New-NetFirewallRule -DisplayName $RuleName `
+                            -Direction Inbound `
+                            -Description $description.OuterXml `
+                            -InterfaceType Any `
+                            -Group $FirewallGroup `
+                            -Action Block `
+                            -RemoteAddress $IpAddress `
+                            -Enable $enabled
+
+                $instanceId = $FWRule.InstanceId
+
+                if($enabled -eq [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True)
+                {
+                    $executionTime = $unblockTime
+                }
+
+                if($BlockCount -gt 1)
+                {
+                    CreateUnblockTask $RuleName $executionTime
+                }
+            }
+            else #Subsequent login failures
+            {
+                $instanceId = $FWRule.InstanceId
+
+                $description = [xml]($FWRule.Description) #Pull XML from rule description field
+                $description.PreserveWhitespace = $true
+                $loginCount = [int]$description.LoginData.FailedLoginCount
+                $loginCount = $loginCount + 1 #increment failed login count
+
+                $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
+                $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
+                $description.LoginData.FailedLoginCount = $loginCount.ToString()
+                $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+
+                if($loginCount -ge $BlockCount)
+                {
+                    Enable-NetFirewallRule -Name $instanceId
+                    $executionTime = $unblockTime
+                }
+
+                Set-NetFirewallRule -Name $RuleName -Description $description.OuterXml #Update XML in description field
+
+                if($loginCount -ge ($BlockCount + 10))
+                {
+                <#
+                    From testing it appears that a large volume of failed logins causes firewall rules
+                    that are edited by multiple processes to occassionally become corrupted and fail to block
+                    the offending IP address. If an IP continues to connect despite the existence of an enabled
+                    firewall, just create a new one.
+                #>
+                    $NewFWRule = New-NetFirewallRule -DisplayName $RuleName `
+                                -Direction Inbound `
+                                -Description $description.OuterXml `
+                                -InterfaceType Any `
+                                -Group $FirewallGroup `
+                                -Action Block `
+                                -RemoteAddress $IpAddress `
+                                -Enable True
+
+                    CreateUnblockTask $RuleName $unblockTime
+                }
+
+                #Update the execution time of the delete task assigned to the firewall rule
+                $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
+
+                Set-ScheduledTask -TaskName $RuleName -TaskPath $FirewallGroup -Trigger $trigger
+            }
         }
-
-        Set-NetFirewallRule -Name $instanceId -Description $description.OuterXml #Update XML in description field
-
-        if($loginCount -ge ($BlockCount + 10))
-        {
-        <#
-        From testing it appears that a large volume of failed logins causes firewall rules
-        that are edited by multiple processes to occassionally become corrupted and fail to block
-        the offending IP address. If an IP continues to connect despite the existence of an enabled
-        firewall, just create a new one.
-        #>
-            $NewFWRule = New-NetFirewallRule -DisplayName $RuleName `
-                        -Direction Inbound `
-                        -Description $description.OuterXml `
-                        -InterfaceType Any `
-                        -Group $FirewallGroup `
-                        -Action Block `
-                        -RemoteAddress $IpAddress `
-                        -Enable True
-
-            CreateUnblockTask $NewFWRule.InstanceId $RuleName $unblockTime
-        }
-
-        #Update the execution time of the delete task assigned to the firewall rule
-        $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
-
-        Set-ScheduledTask -TaskName $instanceId -TaskPath $FirewallGroup -Trigger $trigger
+    }
+    finally
+    {
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
     }
 }
 
@@ -545,82 +566,99 @@ function ProcessFailedLoginNetsh
 
     $ruleName = [string]::Format($ruleNameTemplate, $IpAddress)
 
-    $FWRule = netsh advfirewall firewall show rule name="$ruleName" verbose
-
-    $counterResetTime = (Get-Date).AddHours([System.Math]::Max($ResetCounterTimeHours, 1))
-
-    $unblockTime = Get-UnblockTime
-
-    $executionTime = $counterResetTime
-    
-    if($FWRule -eq 'No rules match the specified criteria.') #First failed login
+    #Synchronize access by IP address
+    [System.Threading.Mutex]$mutex = $null
+    if(-not [System.Threading.Mutex]::TryOpenExisting($ruleName, [ref] $mutex))
     {
-        #Login data saved to rule description field
-        [xml]$description = $LoginData
-
-        $description.LoginData.FailedLoginCount = "1"
-        $description.LoginData.IpAddress = $IpAddress
-        $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
-        $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
-        $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
-
-        #Set placeholder rule that will be enabled when failed login threshold met
-        $enabled = "no"
-
-        if($BlockCount -le 1) #Block on first failed attempt
-        {
-            $enabled = "yes"
-        }
-
-        $descriptionXml = $description.OuterXml;
-        netsh advfirewall firewall add rule name=$ruleName dir=in interface=any action=block remoteip=$IPAddress enable=$enabled description="$descriptionXml"
-        Get-NetFirewallRule -DisplayName $ruleName | ForEach { $_.Group = $FirewallGroup; Set-NetFirewallRule -InputObject $_ }
-
-        if($enabled -eq 'yes')
-        {
-            $executionTime = $unblockTime
-        }
-
-        CreateUnblockTask $RuleName $RuleName $executionTime
+        $mutex = [System.Threading.Mutex]::new($false, $ipAddress)
     }
-    else #Subsequent login failures
+
+    try
     {
-        $description = [xml](($FWRule | Where-Object {$_.StartsWith('Description:') } | select -First 1).Replace('Description:', '').Trim()) #Pull XML from rule description field
-        $description.PreserveWhitespace = $true
-        $loginCount = [int]$description.LoginData.FailedLoginCount
-        $loginCount = $loginCount + 1 #increment failed login count
-
-        $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
-        $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
-        $description.LoginData.FailedLoginCount = $loginCount.ToString()
-        $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
-
-        if($loginCount -ge $BlockCount)
+        if($mutex.WaitOne(30000))
         {
-            netsh advfirewall firewall set rule name=$RuleName new enable=yes
-            $executionTime = $unblockTime
+            $FWRule = netsh advfirewall firewall show rule name="$ruleName" verbose
+
+            $counterResetTime = (Get-Date).AddHours([System.Math]::Max($ResetCounterTimeHours, 1))
+
+            $unblockTime = Get-UnblockTime
+
+            $executionTime = $counterResetTime
+    
+            if($FWRule -eq 'No rules match the specified criteria.') #First failed login
+            {
+                #Login data saved to rule description field
+                [xml]$description = $LoginData
+
+                $description.LoginData.FailedLoginCount = "1"
+                $description.LoginData.IpAddress = $IpAddress
+                $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
+                $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
+                $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+
+                #Set placeholder rule that will be enabled when failed login threshold met
+                $enabled =  (&{If($BlockCount -le 1) {"yes"} Else {"no"}})
+
+                $descriptionXml = $description.OuterXml;
+
+                netsh advfirewall firewall add rule name=$ruleName dir=in interface=any action=block remoteip=$IPAddress enable=$enabled description="$descriptionXml"
+                Get-NetFirewallRule -DisplayName $ruleName | ForEach { $_.Group = $FirewallGroup; Set-NetFirewallRule -InputObject $_ }
+
+                if($enabled -eq 'yes')
+                {
+                    $executionTime = $unblockTime
+                }
+
+                if($BlockCount -gt 1)
+                {
+                    CreateUnblockTask $RuleName $executionTime
+                }
+            }
+            else #Subsequent login failures
+            {
+                $description = [xml](($FWRule | Where-Object {$_.StartsWith('Description:') } | select -First 1).Replace('Description:', '').Trim()) #Pull XML from rule description field
+                $description.PreserveWhitespace = $true
+                $loginCount = [int]$description.LoginData.FailedLoginCount
+                $loginCount = $loginCount + 1 #increment failed login count
+
+                $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
+                $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
+                $description.LoginData.FailedLoginCount = $loginCount.ToString()
+                $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+
+                if($loginCount -ge $BlockCount)
+                {
+                    netsh advfirewall firewall set rule name=$RuleName new enable=yes
+                    $executionTime = $unblockTime
+                }
+
+                $xmlText = $description.OuterXml
+                netsh advfirewall firewall set rule name=$ruleName new description="$xmlText" #Update XML in description field
+
+                if($loginCount -ge ($BlockCount + 10))
+                {
+                    <#
+                    From testing it appears that a large volume of failed logins causes firewall rules
+                    that are edited by multiple processes to occassionally become corrupted and fail to block
+                    the offending IP address. If an IP continues to connect despite the existence of an enabled
+                    firewall rule, just create a new one.
+                    #>
+                    netsh advfirewall firewall add rule name=$RuleName dir=in interface=any action=block remoteip=$IPAddress enable=yes description="$description"
+
+                    CreateUnblockTask $RuleName $unblockTime
+                }
+
+                #Update the execution time of the delete task assigned to the firewall rule
+                $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
+
+                Set-ScheduledTask -TaskName $ruleName -TaskPath $FirewallGroup -Trigger $trigger
+            }
         }
-
-        $xmlText = $description.OuterXml
-        netsh advfirewall firewall set rule name=$ruleName new description="$xmlText" #Update XML in description field
-
-        if($loginCount -ge ($BlockCount + 10))
-        {
-        <#
-        From testing it appears that a large volume of failed logins causes firewall rules
-        that are edited by multiple processes to occassionally become corrupted and fail to block
-        the offending IP address. If an IP continues to connect despite the existence of an enabled
-        firewall, just create a new one.
-        #>
-            netsh advfirewall firewall add rule name=$RuleName dir=in interface=any action=block remoteip=$IPAddress enable=yes description="$description"
-
-            CreateUnblockTask $RuleName $RuleName $unblockTime
-        }
-
-        #Update the execution time of the delete task assigned to the firewall rule
-        $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
-
-        Set-ScheduledTask -TaskName $ruleName -TaskPath $FirewallGroup -Trigger $trigger
+    }
+    finally
+    {
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
     }
 }
 
@@ -635,11 +673,8 @@ function CreateUnblockTask
     (
         [parameter(position = 0, Mandatory=$true)]
         [string]
-        $InstanceId,
-        [parameter(position = 1, Mandatory=$true)]
-        [string]
         $RuleName,
-        [parameter(position = 2, Mandatory=$true)]
+        [parameter(position = 1, Mandatory=$true)]
         [DateTime]
         $ExecutionTime
     )
@@ -648,15 +683,10 @@ function CreateUnblockTask
     $trigger =  New-ScheduledTaskTrigger -At $ExecutionTime -Once
 
     # Command to remove firewall rule by unique instance ID
-    $firewallRuleDeleteCommand = '-command "Remove-NetFirewallRule -Name ''' + $InstanceId + '''"'
-
-    if($InstanceId -eq $RuleName)
-    {
-        $firewallRuleDeleteCommand = '-command "Remove-NetFirewallRule -DisplayName ''' + $InstanceId + '''"'
-    }
+    $firewallRuleDeleteCommand = '-command "Remove-NetFirewallRule -DisplayName ''' + $RuleName + '''"'
     
     # Command to remove task after running
-    $taskDeleteCommand = '-command "Unregister-ScheduledTask -TaskName ''' + $InstanceId + ''' -TaskPath ''\' + $FirewallGroup + '\'' -Confirm:$false"'
+    $taskDeleteCommand = '-command "Unregister-ScheduledTask -TaskName ''' + $RuleName + ''' -TaskPath ''\' + $FirewallGroup + '\'' -Confirm:$false"'
 
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries `
@@ -673,7 +703,7 @@ function CreateUnblockTask
     $actions = @($firewallRuleDeleteAction, $taskDeleteAction)
     $task = New-ScheduledTask -Action $actions -Trigger $trigger -Principal $principal -Settings $settings -Description $RuleName
 
-    Register-ScheduledTask -TaskName $InstanceId -InputObject $task -TaskPath $FirewallGroup
+    Register-ScheduledTask -TaskName $RuleName -InputObject $task -TaskPath $FirewallGroup
 }
 
 <#
