@@ -417,11 +417,7 @@ function ProcessFailedLogin
     $RuleName = [string]::Format($ruleNameTemplate, $IpAddress)
 
     #Synchronize access by IP address
-    [System.Threading.Mutex]$mutex = $null
-    if(-not [System.Threading.Mutex]::TryOpenExisting($ruleName, [ref] $mutex))
-    {
-        $mutex = [System.Threading.Mutex]::new($true, $ipAddress)
-    }
+    $mutex = [System.Threading.Mutex]::new($false, $ipAddress)
 
     try
     {
@@ -463,8 +459,6 @@ function ProcessFailedLogin
                             -RemoteAddress $IpAddress `
                             -Enable $enabled
 
-                $instanceId = $FWRule.InstanceId
-
                 if($enabled -eq [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True)
                 {
                     $executionTime = $unblockTime
@@ -495,7 +489,7 @@ function ProcessFailedLogin
                     $executionTime = $unblockTime
                 }
 
-                Set-NetFirewallRule -Name $RuleName -Description $description.OuterXml #Update XML in description field
+                Set-NetFirewallRule -Name $instanceId -Description $description.OuterXml #Update XML in description field
 
                 if($loginCount -ge ($BlockCount + 10))
                 {
@@ -567,11 +561,7 @@ function ProcessFailedLoginNetsh
     $ruleName = [string]::Format($ruleNameTemplate, $IpAddress)
 
     #Synchronize access by IP address
-    [System.Threading.Mutex]$mutex = $null
-    if(-not [System.Threading.Mutex]::TryOpenExisting($ruleName, [ref] $mutex))
-    {
-        $mutex = [System.Threading.Mutex]::new($false, $ipAddress)
-    }
+    $mutex = [System.Threading.Mutex]::new($false, $ruleName)
 
     try
     {
@@ -678,6 +668,13 @@ function CreateUnblockTask
         [DateTime]
         $ExecutionTime
     )
+    $taskPath = '\' + $FirewallGroup + '\'
+    $taskExists = (Get-ScheduledTask -TaskPath $taskPath -TaskName $RuleName -ErrorAction SilentlyContinue) -ne $null
+    if($taskExists)
+    {
+        Unregister-ScheduledTask -TaskPath $taskPath -TaskName $RuleName -Confirm:$false
+    }
+
     # Create task assigned to firewall rule to eventually delete
     # when either the unblock time or counter reset time expires
     $trigger =  New-ScheduledTaskTrigger -At $ExecutionTime -Once
