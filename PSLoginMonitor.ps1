@@ -521,7 +521,6 @@ function ProcessFailedLogin
     finally
     {
         $mutex.ReleaseMutex()
-        $mutex.Dispose()
     }
 }
 
@@ -648,7 +647,6 @@ function ProcessFailedLoginNetsh
     finally
     {
         $mutex.ReleaseMutex()
-        $mutex.Dispose()
     }
 }
 
@@ -708,6 +706,13 @@ function CreateUnblockTask
 #>
 function Show-FirewallRuleStats
 {
+    [cmdletbinding()]
+    Param
+    (
+        [Parameter()]
+        [switch]
+        $Descending
+    )
     Get-NetFirewallRule -Group $FirewallGroup | ForEach-Object {
         New-Object -Type PSObject -Property @{
             'IPAddress' =  ([xml]$_.Description).LoginData.IpAddress
@@ -717,7 +722,7 @@ function Show-FirewallRuleStats
             'Counter Reset Time' = ([xml]$_.Description).LoginData.CounterResetTime -as [DateTime]
             'Blocked' = (&{If($_.Enabled -eq "True") {"Yes"} Else {"No"}})
         } 
-    } | Sort-Object -Descending {$_."Last Login Attempt"
+    } | Sort-Object -Descending:$Descending {$_."Last Login Attempt"
     } | Format-Table -AutoSize -Property 'IPAddress', 'Failed Login Count', 'Last Login Attempt', 'Unblock Time', 'Counter Reset Time', 'Blocked'
 }
 
@@ -731,18 +736,28 @@ function Install-PSLoginMonitor
     (
         [Parameter(Mandatory=$false)]
         [string]
-        $ScriptPath = "$env:ProgramFiles\WindowsPowerShell\Modules\PS Login Monitor"
-    )
-    Uninstall-PSLoginMonitor $ScriptPath
+        $ScriptPath = "$env:ProgramFiles\WindowsPowerShell\Modules\PS Login Monitor",
 
+        [Parameter()]
+        [switch]
+        $UninstallPrevious
+    )
+    if($UninstallPrevious)
+    {
+        Uninstall-PSLoginMonitor $ScriptPath
+    }
+
+    # Create new task scheduler folder
     $scheduleObject = New-Object -ComObject schedule.service
     $scheduleObject.connect()
     $rootFolder = $scheduleObject.GetFolder("\")
     $rootFolder.CreateFolder($FirewallGroup)
     
+    # Create folder for script and copy
     New-Item -ItemType directory -Path $ScriptPath -Force
     Copy-Item -Path $PSScriptRoot\PSLoginMonitor.ps1 -Destination $ScriptPath -Force
 
+    # Unblock file
     Unblock-File -Path $ScriptPath\PSLoginMonitor.ps1 -Confirm:$false
     
     do
@@ -779,7 +794,7 @@ function Install-PSLoginMonitor
     - all scheduled tasks and task folder
     - all firewall rules
 
-    This is run by the installer to provide a clean install as code is updated
+    Can be run by the installer to provide a clean install as code is updated
 #>
 function Uninstall-PSLoginMonitor
 {
