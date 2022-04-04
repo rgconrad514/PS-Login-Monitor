@@ -45,7 +45,7 @@ $WhiteList = @(
 <# Configuration variables #>
 
 
-<# Constants #>
+<# Constants - DO NOT CHANGE#>
 $dtFormat = "yyyy-MM-dd HH:mm:ss"
 $ruleNameTemplate = "PS Login Monitor block for {0}"
 $FirewallGroup = "PS Login Monitor"
@@ -55,17 +55,18 @@ $FirewallGroup = "PS Login Monitor"
     <IpAddress></IpAddress>
     <FailedLoginCount></FailedLoginCount>
     <LastLoginTime></LastLoginTime>
+    <LastLoginType></LastLoginType>
     <CounterResetTime></CounterResetTime>
     <UnblockTime></UnblockTime>
 </LoginData>”
 
-$EventIdsToProcess = @(
-                        4625,  # Failed windows/RDP login
-                        18456, # Failed MSSQL login, but can also be triggered by other connection failures that are filtered out by $MssqlTextFilters array
-                        17828, # Usually the result of some kind of port scan on MSSQL port
-                        17832, # Usually the result of some kind of port scan on MSSQL port
-                        17836  # Usually the result of some kind of port scan on MSSQL port
-                      )
+$EventIdsToProcess = @{
+                        4625 = 'RDP/RDS'  # Failed windows/RDP login
+                        18456 = 'MSSQL' # Failed MSSQL login, but can also be triggered by other connection failures that are filtered out by $MssqlTextFilters array
+                        17828 = 'MSSQL' # Usually the result of some kind of port scan on MSSQL port
+                        17832 = 'MSSQL' # Usually the result of some kind of port scan on MSSQL port
+                        17836 = 'MSSQL' # Usually the result of some kind of port scan on MSSQL port
+                      }
 
 #For MSSQL event 18456 there are some login failures that a block is not desired and are filtered out based on message text.
 $MssqlTextFilters = @(
@@ -396,7 +397,7 @@ function ProcessFailedLogin
         $IpAddress
     )
 
-    if($EventIdsToProcess.Contains($EventId) -eq $false)
+    if($EventIdsToProcess.ContainsKey($EventId) -eq $false)
     {
         return
     }
@@ -415,6 +416,7 @@ function ProcessFailedLogin
     }
 
     $RuleName = [string]::Format($ruleNameTemplate, $IpAddress)
+    $lastLoginType = $EventIdsToProcess[$EventID]
 
     #Synchronize access by IP address
     $mutex = [System.Threading.Mutex]::new($false, $ipAddress)
@@ -441,6 +443,7 @@ function ProcessFailedLogin
                 $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
                 $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
                 $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+                $description.LoginData.LastLoginType = $lastLoginType
 
                 #Set placeholder rule that will be enabled when failed login threshold met
                 $enabled = [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::False
@@ -482,6 +485,7 @@ function ProcessFailedLogin
                 $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
                 $description.LoginData.FailedLoginCount = $loginCount.ToString()
                 $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+                $description.LoginData.LastLoginType = $lastLoginType
 
                 if($loginCount -ge $BlockCount)
                 {
@@ -490,26 +494,6 @@ function ProcessFailedLogin
                 }
 
                 Set-NetFirewallRule -Name $instanceId -Description $description.OuterXml #Update XML in description field
-
-                if($loginCount -ge ($BlockCount + 10))
-                {
-                <#
-                    From testing it appears that a large volume of failed logins causes firewall rules
-                    that are edited by multiple processes to occassionally become corrupted and fail to block
-                    the offending IP address. If an IP continues to connect despite the existence of an enabled
-                    firewall, just create a new one.
-                #>
-                    $NewFWRule = New-NetFirewallRule -DisplayName $RuleName `
-                                -Direction Inbound `
-                                -Description $description.OuterXml `
-                                -InterfaceType Any `
-                                -Group $FirewallGroup `
-                                -Action Block `
-                                -RemoteAddress $IpAddress `
-                                -Enable True
-
-                    CreateUnblockTask $RuleName $unblockTime
-                }
 
                 #Update the execution time of the delete task assigned to the firewall rule
                 $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
@@ -539,7 +523,7 @@ function ProcessFailedLoginNetsh
         $IpAddress
     )
 
-    if($EventIdsToProcess.Contains($EventId) -eq $false)
+    if($EventIdsToProcess.ContainsKey($EventId) -eq $false)
     {
         return
     }
@@ -558,6 +542,7 @@ function ProcessFailedLoginNetsh
     }
 
     $ruleName = [string]::Format($ruleNameTemplate, $IpAddress)
+    $lastLoginType = $EventIdsToProcess[$EventID]
 
     #Synchronize access by IP address
     $mutex = [System.Threading.Mutex]::new($false, $ruleName)
@@ -584,6 +569,7 @@ function ProcessFailedLoginNetsh
                 $description.LoginData.CounterResetTime = $counterResetTime.ToString($dtFormat)
                 $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
                 $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+                $description.LoginData.LastLoginType = $lastLoginType
 
                 #Set placeholder rule that will be enabled when failed login threshold met
                 $enabled =  (&{If($BlockCount -le 1) {"yes"} Else {"no"}})
@@ -614,6 +600,7 @@ function ProcessFailedLoginNetsh
                 $description.LoginData.UnblockTime = $unblockTime.ToString($dtFormat)
                 $description.LoginData.FailedLoginCount = $loginCount.ToString()
                 $description.LoginData.LastLoginTime = (Get-Date).ToString($dtFormat)
+                $description.LoginData.LastLoginType = $lastLoginType
 
                 if($loginCount -ge $BlockCount)
                 {
@@ -623,19 +610,6 @@ function ProcessFailedLoginNetsh
 
                 $xmlText = $description.OuterXml
                 netsh advfirewall firewall set rule name=$ruleName new description="$xmlText" #Update XML in description field
-
-                if($loginCount -ge ($BlockCount + 10))
-                {
-                    <#
-                    From testing it appears that a large volume of failed logins causes firewall rules
-                    that are edited by multiple processes to occassionally become corrupted and fail to block
-                    the offending IP address. If an IP continues to connect despite the existence of an enabled
-                    firewall rule, just create a new one.
-                    #>
-                    netsh advfirewall firewall add rule name=$RuleName dir=in interface=any action=block remoteip=$IPAddress enable=yes description="$description"
-
-                    CreateUnblockTask $RuleName $unblockTime
-                }
 
                 #Update the execution time of the delete task assigned to the firewall rule
                 $trigger =  New-ScheduledTaskTrigger -At $executionTime -Once
@@ -718,12 +692,13 @@ function Show-FirewallRuleStats
             'IPAddress' =  ([xml]$_.Description).LoginData.IpAddress
             'Failed Login Count'  = ([xml]$_.Description).LoginData.FailedLoginCount -as [int]
             'Last Login Attempt' = ([xml]$_.Description).LoginData.LastLoginTime -as [DateTime]
+            'Last Login Type' = ([xml]$_.Description).LoginData.LastLoginType
             'Unblock Time' = ([xml]$_.Description).LoginData.UnblockTime -as [DateTime]
             'Counter Reset Time' = ([xml]$_.Description).LoginData.CounterResetTime -as [DateTime]
             'Blocked' = (&{If($_.Enabled -eq "True") {"Yes"} Else {"No"}})
         } 
     } | Sort-Object -Descending:$Descending {$_."Last Login Attempt"
-    } | Format-Table -AutoSize -Property 'IPAddress', 'Failed Login Count', 'Last Login Attempt', 'Unblock Time', 'Counter Reset Time', 'Blocked'
+    } | Format-Table -AutoSize -Property 'IPAddress', 'Failed Login Count', 'Last Login Attempt', 'Last Login Type', 'Unblock Time', 'Counter Reset Time', 'Blocked'
 }
 
 <#
